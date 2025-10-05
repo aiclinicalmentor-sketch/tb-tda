@@ -1,6 +1,6 @@
 // api/tb_peds_tda.js
 module.exports = async (req, res) => {
-  // 🔹 NEW: Always respond as JSON
+  // Always respond as JSON
   res.setHeader("content-type", "application/json");
 
   const API_KEY = process.env.TB_PEDS_TDA_API_KEY || "";
@@ -29,7 +29,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  // 🔹 NEW: Validate required keys early
+  // Validate required keys early
   if (!body.algorithm || !body.age_band || !body.symptoms) {
     res.status(400).json({
       error: "BadRequest",
