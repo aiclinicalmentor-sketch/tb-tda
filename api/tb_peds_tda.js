@@ -18,6 +18,7 @@ module.exports = async (req, res) => {
     return;
   }
 
+  // Robust JSON body parse (handles string body too)
   let body = {};
   try {
     body =
@@ -28,6 +29,25 @@ module.exports = async (req, res) => {
     res.status(400).json({ error: "Invalid JSON" });
     return;
   }
+
+  // --- ECHO BLOCK (place BEFORE validation/logic) ---
+  // Use URL to read query reliably in Vercel functions
+  let echo = false;
+  try {
+    const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    echo = u.searchParams.get("echo") === "1";
+  } catch {}
+  if (echo) {
+    return res.status(200).json({
+      received: body,
+      validation: {
+        has_algorithm: !!body?.algorithm,
+        has_age_band: !!body?.age_band,
+        has_symptoms: !!body?.symptoms && typeof body.symptoms === "object",
+      },
+    });
+  }
+  // --- END ECHO BLOCK ---
 
   // Validate required keys early
   if (!body.algorithm || !body.age_band || !body.symptoms) {
@@ -44,8 +64,9 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const algorithm = body.algorithm;
-  const age_band = body.age_band;
+  // Normalize common variants (en-dash vs hyphen, spacing)
+  const algorithm = String(body.algorithm).toUpperCase().trim();
+  const age_band = normalizeAgeBand(String(body.age_band));
   const symptoms = body.symptoms || {};
   const vitals = body.vitals || {};
   const cxr = body.cxr || {};
@@ -129,18 +150,24 @@ module.exports = async (req, res) => {
 };
 
 // ---- helpers ----
+function normalizeAgeBand(a) {
+  // Accept "<2m","2–12m","2-12m","1–5y","1-5y",">5y"
+  return a.replace(/–/g, "-").trim();
+}
 function isTachypnoeic(age, rr) {
   if (rr == null) return false;
-  if (age === "<2m") return rr >= 60;
-  if (age === "2–12m") return rr >= 50;
-  if (age === "1–5y") return rr >= 40;
+  const a = normalizeAgeBand(age);
+  if (a === "<2m") return rr >= 60;
+  if (a === "2-12m") return rr >= 50;
+  if (a === "1-5y") return rr >= 40;
   return rr >= 30; // >5y
 }
 function isTachycardic(age, hr) {
   if (hr == null) return false;
-  if (age === "<2m") return hr >= 170;
-  if (age === "2–12m") return hr >= 160;
-  if (age === "1–5y") return hr >= 140;
+  const a = normalizeAgeBand(age);
+  if (a === "<2m") return hr >= 170;
+  if (a === "2-12m") return hr >= 160;
+  if (a === "1-5y") return hr >= 140;
   return hr >= 120; // >5y
 }
 function human(k) {
