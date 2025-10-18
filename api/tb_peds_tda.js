@@ -19,7 +19,7 @@ module.exports = async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  // ---- Parse body safely (supports raw JSON string or parsed object) ----
+  // ---- Parse body safely (supports raw JSON string || parsed object) ----
   let body = {};
   try {
     body =
@@ -30,14 +30,15 @@ module.exports = async (req, res) => {
     return res.status(400).json({ error: "InvalidJSON" });
   }
 
-  // ---- Echo mode (either ?echo=1 query or X-Debug-Echo: 1 header) ----
+  // ---- Echo mode (either ?echo=1 query || X-Debug-Echo: 1 header) ----
   let echo = false;
   try {
     const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     echo = u.searchParams.get("echo") === "1";
   } catch { /* noop */ }
   const echoHeader = (req.headers["x-debug-echo"] || "") === "1";
-  if (echo || echoHeader) {
+  const echoBody = body && (body.echo === "1" || body.echo === 1 || body.echo === true);
+  if (echo || echoHeader || echoBody) {
     return res.status(200).json({
       received: body,
       validation: {
@@ -71,7 +72,7 @@ module.exports = async (req, res) => {
 
   // Validate enums
   if (!["A", "B"].includes(algorithm)) {
-    return res.status(400).json({ error: "BadRequest", message: 'algorithm must be "A" or "B"' });
+    return res.status(400).json({ error: "BadRequest", message: 'algorithm must be "A" || "B"' });
   }
   const allowedAgeBands = new Set(["<2m", "2-12m", "1-5y", ">5y"]);
   if (!allowedAgeBands.has(age_band)) {
@@ -90,7 +91,9 @@ module.exports = async (req, res) => {
     });
   }
 
-  // ---- Scoring tables ----
+  // ---- COMPUTE (defensive wrapper) ----
+try {
+// ---- Scoring tables ----
   const B_POINTS = {
     cough_gt_2w: 5,
     fever_gt_2w: 10,
@@ -101,6 +104,15 @@ module.exports = async (req, res) => {
     swollen_nodes: 7,
     tachycardia: 4,
     tachypnoea: 2,
-  };
+  
+} catch (err) {
+  console.error('tb_peds_tda runtime error:', err);
+  return res.status(500).json({
+    error: 'InternalError',
+    message: 'Unexpected error while evaluating TB algorithm.',
+    dev_hint: (err && err.message) || String(err),
+  });
+}
+};
   const A_SYMPTOMS = {
     c
