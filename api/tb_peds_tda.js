@@ -1,18 +1,40 @@
 // /api/tb_peds_tda.js
 // Vercel Node.js Serverless Function (CommonJS)
-//
-// Fixes:
-//  - Supports echo via query (?echo=1), header (X-Debug-Echo: 1), and body ("echo": "1"/1/true)
-//  - Defensive try/catch around COMPUTE section (balanced braces)
-//  - Strict auth + validation preserved
-//
-// Replace your /api/tb_peds_tda.js with this file's content.
 
 function isObject(v) {
   return v && typeof v === "object" && !Array.isArray(v);
 }
 
-const CXR_KEYS = ["cavities","enlarged_nodes","opacities","miliary","pleural_effusion","atelectasis"];
+// Canonical CXR keys for Algorithm A
+const CXR_KEYS = ["opacities","enlarged_nodes","cavities","miliary","pleural_effusion","atelectasis"];
+
+// ---- CXR alias normalizer (reads only from body.cxr) ----
+function normalizeCxr(raw) {
+  const cxr = isObject(raw) ? raw : {};
+  const anyTrue = (o, ...keys) => keys.some(k => !!o[k]);
+
+  const opacities = !!(cxr.opacities ?? cxr.opacity ?? cxr.consolidation ?? cxr.infiltrate);
+  const enlarged_nodes = anyTrue(
+    cxr,
+    "enlarged_nodes",
+    "hilar_lymphadenopathy",
+    "hilar_nodes",
+    "mediastinal_lymphadenopathy",
+    "mediastinal_nodes"
+  );
+  const cavities = !!(cxr.cavities ?? cxr.cavity ?? cxr.cavitation);
+  const miliary = !!cxr.miliary;
+  const pleural_effusion = !!(cxr.pleural_effusion ?? cxr.effusion);
+  const atelectasis = !!cxr.atelectasis;
+
+  const normalized = { opacities, enlarged_nodes, cavities, miliary, pleural_effusion, atelectasis };
+
+  // Optional coherence
+  normalized.performed = cxr.performed !== false; // default true if not explicitly false
+  normalized.normal = !CXR_KEYS.some(k => normalized[k] === true);
+
+  return normalized;
+}
 
 module.exports = async function handler(req, res) {
   // ---- Method gate ----
@@ -26,16 +48,15 @@ module.exports = async function handler(req, res) {
     return res.status(500).json({ error: "ServerMisconfigured", message: "Missing API key" });
   }
   const auth = String(req.headers.authorization || "");
-  const expected = `Bearer ${API_KEY}`;
-  if (auth !== expected) {
+  if (auth !== `Bearer ${API_KEY}`) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  // ---- Body parse (Vercel already parses JSON; keep defensive) ----
+  // ---- Body parse ----
   let body = {};
   try {
     body = isObject(req.body) ? req.body : {};
-  } catch (_e) {
+  } catch {
     return res.status(400).json({ error: "InvalidJSON" });
   }
 
@@ -44,10 +65,9 @@ module.exports = async function handler(req, res) {
   try {
     const u = new URL(req.url, `http://${req.headers.host || "localhost"}`);
     echo = u.searchParams.get("echo") === "1";
-  } catch (_e) { /* noop */ }
+  } catch {}
   const echoHeader = (req.headers["x-debug-echo"] || "") === "1";
   const echoBody = body && (body.echo === "1" || body.echo === 1 || body.echo === true);
-
   if (echo || echoHeader || echoBody) {
     return res.status(200).json({
       received: body,
@@ -55,6 +75,7 @@ module.exports = async function handler(req, res) {
         has_algorithm: !!body?.algorithm,
         has_age_band: !!body?.age_band,
         has_symptoms_obj: isObject(body?.symptoms),
+        has_cxr_obj: isObject(body?.cxr)
       },
       hint: "Echo mode active (query/header/body). Remove echo to run compute."
     });
@@ -64,32 +85,34 @@ module.exports = async function handler(req, res) {
   if (!body.algorithm || !body.age_band || !isObject(body.symptoms)) {
     return res.status(400).json({
       error: "BadRequest",
-      message: "Required fields: algorithm, age_band, symptoms (object)",
+      message: "Required fields: algorithm, age_band, symptoms (object)"
     });
   }
 
-  // ---- Normalize & validate enums ----
-  const algorithm = String(body.algorithm).trim().toUpperCase(); // 'A' or 'B'
-  const age_band = String(body.age_band).trim();                 // 'lt1y' | '1-5y' | 'gt5y'
+  // ---- Normalize inputs ----
+  const algorithm = String(body.algorithm).trim().toUpperCase(); // 'A' | 'B'
+  const age_band = String(body.age_band).trim();                 // e.g., 'lt1y' | '1-5y' | 'gt5y'
   const symptoms = body.symptoms;
+  const cxr = normalizeCxr(body.cxr);
 
   if (!["A", "B"].includes(algorithm)) {
     return res.status(400).json({ error: "BadRequest", message: "algorithm must be 'A' or 'B'" });
   }
 
+  // ---- Validation specific to Algorithm A: require ≥1 positive CXR finding under cxr ----
   if (algorithm === "A") {
-    const hasCXR = CXR_KEYS.some(k => !!symptoms[k]);
-    if (!hasCXR) {
+    const hasCxrFinding = CXR_KEYS.some(k => cxr[k] === true);
+    if (!hasCxrFinding) {
       return res.status(400).json({
         error: "BadRequest",
-        message: "Algorithm A requires ≥1 CXR finding to be true",
+        message: "Algorithm A requires ≥1 positive CXR finding under 'cxr'."
       });
     }
   }
 
-  // ---- COMPUTE (defensive wrapper; BALANCED BRACES) ----
+  // ---- COMPUTE (defensive wrapper) ----
   try {
-    // --- Example scoring for Algorithm B (replace with your exact logic if different) ---
+    // Example B points (keep your existing mapping if different)
     const B_POINTS = {
       cough_gt_2w: 5,
       fever_gt_2w: 10,
@@ -99,14 +122,11 @@ module.exports = async function handler(req, res) {
       night_sweats: 4,
       swollen_nodes: 7,
       tachycardia: 4,
-      tachypnoea: 2,
+      tachypnoea: 2, // accept UK spelling in symptoms
+      tachypnea: 2   // and US spelling
     };
 
-    const stratify = (score) => {
-      if (score >= 15) return "high";
-      if (score >= 8) return "moderate";
-      return "low";
-    };
+    const stratify = (score) => (score >= 15 ? "high" : score >= 8 ? "moderate" : "low");
 
     let result;
 
@@ -124,35 +144,42 @@ module.exports = async function handler(req, res) {
           "Consider TB testing per local protocol (e.g., Xpert MTB/RIF).",
           "Assess for alternative diagnoses and severity.",
           "If risk is high or concern persists, escalate for imaging/specialist review."
-        ],
+        ]
       };
     } else {
-      // Minimal A placeholder: weight CXR findings more heavily
-      const cxr_count = CXR_KEYS.reduce((n, k) => n + (symptoms[k] ? 1 : 0), 0);
-      const nonCxrKeys = Object.keys(symptoms).filter(k => !CXR_KEYS.includes(k));
-      const s_count = nonCxrKeys.reduce((n, k) => n + (symptoms[k] ? 1 : 0), 0);
-      const score = cxr_count * 5 + s_count * 1;
+      // Algorithm A: CXR-driven (use ONLY cxr for CXR hits)
+      const cxr_count = CXR_KEYS.reduce((n, k) => n + (cxr[k] ? 1 : 0), 0);
+
+      // If you also add symptom weight in A, count non-CXR symptoms from `symptoms`
+      const nonCxrSymptomCount = Object.values(symptoms).reduce((n, v) => n + (v ? 1 : 0), 0);
+
+      const score = cxr_count * 5 + nonCxrSymptomCount * 1;
 
       result = {
         algorithm: "A",
         age_band,
         score,
-        cxr_hits: CXR_KEYS.filter(k => !!symptoms[k]),
+        cxr_hits: CXR_KEYS.filter(k => cxr[k]),
+        cxr: { ...cxr, normal: !CXR_KEYS.some(k => cxr[k]) },
         risk_band: stratify(score),
         next_steps: [
           "Review CXR with a TB-experienced clinician.",
           "Proceed with appropriate TB diagnostics based on age/capacity."
-        ],
+        ]
       };
     }
 
-    return res.status(200).json({ ok: true, input: { algorithm, age_band, symptoms }, result });
+    return res.status(200).json({
+      ok: true,
+      input: { algorithm, age_band, symptoms, cxr },
+      result
+    });
   } catch (err) {
     console.error("tb_peds_tda runtime error:", err);
     return res.status(500).json({
       error: "InternalError",
       message: "Unexpected error while evaluating TB algorithm.",
-      dev_hint: (err && err.message) || String(err),
+      dev_hint: (err && err.message) || String(err)
     });
   }
 };
